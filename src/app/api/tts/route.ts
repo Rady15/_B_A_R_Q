@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
   try {
@@ -46,6 +47,7 @@ export async function POST(req: NextRequest) {
         contentType: 'audio/mpeg',
         languageCode: language,
         usedVoice: voice,
+        provider: 'openai',
       },
       { status: 200 }
     );
