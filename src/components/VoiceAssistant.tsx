@@ -11,6 +11,39 @@ export default function VoiceAssistant() {
   const [aiResponse, setAiResponse] = useState('')
   const recognitionRef = useRef<any>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const ttsBusyRef = useRef(false)
+  const lastTtsAtRef = useRef(0)
+  const TTS_COOLDOWN_MS = 1000
+
+  // Pause/Resume state and idle detection
+  const [isPaused, setIsPaused] = useState(false)
+  const lastActivityRef = useRef<number>(Date.now())
+  const IDLE_TIMEOUT_MS = 20000 // 20s idle auto-stop
+  const firstTurnRef = useRef(true)
+
+  const markActivity = () => {
+    lastActivityRef.current = Date.now()
+  }
+
+  const resumeListeningIfAllowed = () => {
+    if (recognitionRef.current && !isPaused) {
+      recognitionRef.current.start()
+    }
+  }
+
+  // Auto stop listening on idle
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (isListening && !isSpeaking) {
+        const idleFor = Date.now() - lastActivityRef.current
+        if (idleFor > IDLE_TIMEOUT_MS && recognitionRef.current) {
+          recognitionRef.current.stop()
+          setIsListening(false)
+        }
+      }
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [isListening, isSpeaking, isPaused])
 
   useEffect(() => {
     // Voice Recognition Setup
@@ -26,13 +59,18 @@ export default function VoiceAssistant() {
         const res = event.results[idx]
         if (res && res.isFinal) {
           const finalTranscript = res[0].transcript
+          const trimmed = (finalTranscript || '').trim()
           setTranscript(finalTranscript)
+          if (trimmed.length === 0) {
+            return
+          }
+          markActivity()
           // barge-in: أوقف أي صوت جارٍ
           if (audioRef.current) {
             audioRef.current.pause()
             audioRef.current.currentTime = 0
           }
-          handleAIResponse(finalTranscript)
+          handleAIResponse(trimmed)
         }
       }
 
@@ -43,6 +81,7 @@ export default function VoiceAssistant() {
       // عند بدء الاستماع، أوقف أي صوت جارٍ (barge-in)
       recognitionRef.current.onstart = () => {
         setIsListening(true)
+        markActivity()
         if (audioRef.current) {
           audioRef.current.pause()
           audioRef.current.currentTime = 0
@@ -56,6 +95,7 @@ export default function VoiceAssistant() {
   }, [language])
 
   const startListening = () => {
+    if (isPaused) return
     if (recognitionRef.current) {
       // barge-in: أوقف أي صوت قبل البدء
       if (audioRef.current) {
@@ -63,18 +103,25 @@ export default function VoiceAssistant() {
         audioRef.current.currentTime = 0
       }
       setIsListening(true)
+      markActivity()
       recognitionRef.current.start()
     }
   }
 
   const handleAIResponse = async (userInput: string) => {
+    const message = (userInput || '').trim()
+    if (!message) {
+      return
+    }
+    const isFirst = firstTurnRef.current
+    firstTurnRef.current = false
     try {
       const response = await fetch('/api/ai-chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ message: userInput, language }),
+        body: JSON.stringify({ message, language, isFirst }),
       })
 
       // Check if response is OK before parsing JSON
@@ -130,6 +177,29 @@ export default function VoiceAssistant() {
   }
 
   const speakResponse = async (text: string) => {
+    // امنع الاستدعاء المتكرر أثناء النطق
+    if (isPaused) return
+    if (ttsBusyRef.current) return
+    const now = Date.now()
+    // تبريد بين الطلبات لتفادي 429
+    if (now - lastTtsAtRef.current < TTS_COOLDOWN_MS) {
+      // استخدم الصوت المحلي أثناء التبريد
+      if ('speechSynthesis' in window) {
+        const synth = window.speechSynthesis
+        const utter = new SpeechSynthesisUtterance(text)
+        utter.lang = language === 'ar' ? 'ar-EG' : 'en-US'
+        setIsSpeaking(true)
+        utter.onend = () => {
+          setIsSpeaking(false)
+          lastTtsAtRef.current = Date.now()
+          resumeListeningIfAllowed()
+        }
+        synth.cancel()
+        synth.speak(utter)
+      }
+      return
+    }
+    ttsBusyRef.current = true
     try {
       // أوقف الاستماع أثناء تشغيل الصوت لتجنب التداخل
       if (recognitionRef.current) {
@@ -137,6 +207,8 @@ export default function VoiceAssistant() {
       }
       setIsSpeaking(true)
 
+      // تأخير بسيط قبل الإرسال لتقليل الضغط على المزود
+      await new Promise(r => setTimeout(r, 500))
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -151,7 +223,10 @@ export default function VoiceAssistant() {
       })
 
       if (!res.ok) {
-        // Fallback: عند انتهاء الحصة (429) استخدم Web Speech API محلياً بدون طباعة خطأ
+        const errText = await res.text()
+        console.error('TTS API Error:', errText)
+
+        // Fallback: عند انتهاء الحصة (429) استخدم Web Speech API محلياً
         if (res.status === 429 && 'speechSynthesis' in window) {
           const synth = window.speechSynthesis
           const utter = new SpeechSynthesisUtterance(text)
@@ -159,18 +234,19 @@ export default function VoiceAssistant() {
           setIsSpeaking(true)
           utter.onend = () => {
             setIsSpeaking(false)
-            if (recognitionRef.current) recognitionRef.current.start()
+            lastTtsAtRef.current = Date.now()
+            ttsBusyRef.current = false
+            resumeListeningIfAllowed()
           }
           synth.cancel()
           synth.speak(utter)
           return
         }
 
-        // حالات أخرى: اطبع الخطأ ثم ارجع للاستماع
-        const errText = await res.text()
-        console.error('TTS API Error:', errText)
         setIsSpeaking(false)
-        if (recognitionRef.current) recognitionRef.current.start()
+        lastTtsAtRef.current = Date.now()
+        ttsBusyRef.current = false
+        resumeListeningIfAllowed()
         return
       }
 
@@ -178,7 +254,7 @@ export default function VoiceAssistant() {
       const { audioContent, contentType } = data
       if (!audioContent) {
         setIsSpeaking(false)
-        if (recognitionRef.current) recognitionRef.current.start()
+        resumeListeningIfAllowed()
         return
       }
 
@@ -201,20 +277,27 @@ export default function VoiceAssistant() {
       audio.onended = () => {
         setIsSpeaking(false)
         URL.revokeObjectURL(url)
+        lastTtsAtRef.current = Date.now()
+        ttsBusyRef.current = false
+        markActivity()
         // استئناف الاستماع بعد انتهاء الصوت
-        if (recognitionRef.current) recognitionRef.current.start()
+        resumeListeningIfAllowed()
       }
 
       audio.play().catch(err => {
         console.error('Audio play error:', err)
         setIsSpeaking(false)
         URL.revokeObjectURL(url)
-        if (recognitionRef.current) recognitionRef.current.start()
+        lastTtsAtRef.current = Date.now()
+        ttsBusyRef.current = false
+        resumeListeningIfAllowed()
       })
     } catch (e) {
       console.error('speakResponse error:', e)
       setIsSpeaking(false)
-      if (recognitionRef.current) recognitionRef.current.start()
+      lastTtsAtRef.current = Date.now()
+      ttsBusyRef.current = false
+      resumeListeningIfAllowed()
     }
   }
 
@@ -226,7 +309,8 @@ export default function VoiceAssistant() {
       audioRef.current.pause()
       audioRef.current.currentTime = 0
     }
-    speakResponse(welcome)
+    if (!isPaused) speakResponse(welcome)
+    firstTurnRef.current = false
   }
 
   return (
@@ -239,6 +323,34 @@ export default function VoiceAssistant() {
             className="px-3 py-2 bg-blue-500 hover:bg-blue-400 text-primary-foreground font-semibold rounded-lg transition-all transform hover:scale-105 text-sm"
           >
             🎤 {language === 'ar' ? 'ترحيب' : 'Welcome'}
+          </button>
+          <button
+            onClick={() => {
+              setIsPaused(prev => {
+                const next = !prev
+                if (next) {
+                  // Pausing: stop recognition and any audio/tts
+                  if (recognitionRef.current) recognitionRef.current.stop()
+                  if (audioRef.current) {
+                    audioRef.current.pause()
+                    audioRef.current.currentTime = 0
+                  }
+                  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+                    window.speechSynthesis.cancel()
+                  }
+                  setIsListening(false)
+                  setIsSpeaking(false)
+                  ttsBusyRef.current = false
+                } else {
+                  // Resuming: mark activity so idle timer doesn't instantly stop
+                  markActivity()
+                }
+                return next
+              })
+            }}
+            className={`px-3 py-2 ${isPaused ? 'bg-yellow-500 hover:bg-yellow-400' : 'bg-gray-600 hover:bg-gray-500'} text-primary-foreground font-semibold rounded-lg transition-all transform hover:scale-105 text-sm`}
+          >
+            {isPaused ? (language === 'ar' ? '▶️ استئناف' : '▶️ Resume') : (language === 'ar' ? '⏸️ إيقاف' : '⏸️ Pause')}
           </button>
           <button
             onClick={startListening}
