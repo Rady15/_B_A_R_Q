@@ -51,9 +51,12 @@ export async function POST(req: NextRequest) {
     );
   } catch (error: any) {
     const errMsg = (error && (error.message || error.toString())) || 'Unknown error';
+    const status = (error && (error.status || error.code)) === 429 || (typeof errMsg === 'string' && errMsg.includes('429'))
+      ? 429
+      : 500;
     return NextResponse.json(
       { error: 'TTS Error', details: errMsg },
-      { status: 500 }
+      { status }
     );
   }
 }
