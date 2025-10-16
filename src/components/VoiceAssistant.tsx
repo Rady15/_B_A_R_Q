@@ -10,25 +10,43 @@ export default function VoiceAssistant() {
   const [transcript, setTranscript] = useState('')
   const [aiResponse, setAiResponse] = useState('')
   const recognitionRef = useRef<any>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
 
   useEffect(() => {
     // Voice Recognition Setup
     if (typeof window !== 'undefined' && 'webkitSpeechRecognition' in window) {
       const SpeechRecognition = (window as any).webkitSpeechRecognition
       recognitionRef.current = new SpeechRecognition()
-      recognitionRef.current.continuous = false
-      recognitionRef.current.interimResults = false
+      recognitionRef.current.continuous = true
+      recognitionRef.current.interimResults = true
       recognitionRef.current.lang = language === 'ar' ? 'ar-EG' : 'en-US'
 
       recognitionRef.current.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript
-        setTranscript(transcript)
-        handleAIResponse(transcript)
+        const idx = event.resultIndex
+        const res = event.results[idx]
+        if (res && res.isFinal) {
+          const finalTranscript = res[0].transcript
+          setTranscript(finalTranscript)
+          // barge-in: أوقف أي صوت جارٍ
+          if (audioRef.current) {
+            audioRef.current.pause()
+            audioRef.current.currentTime = 0
+          }
+          handleAIResponse(finalTranscript)
+        }
       }
 
       recognitionRef.current.onerror = (event: any) => {
         console.error('Speech recognition error:', event.error)
         setIsListening(false)
+      }
+      // عند بدء الاستماع، أوقف أي صوت جارٍ (barge-in)
+      recognitionRef.current.onstart = () => {
+        setIsListening(true)
+        if (audioRef.current) {
+          audioRef.current.pause()
+          audioRef.current.currentTime = 0
+        }
       }
 
       recognitionRef.current.onend = () => {
@@ -39,6 +57,11 @@ export default function VoiceAssistant() {
 
   const startListening = () => {
     if (recognitionRef.current) {
+      // barge-in: أوقف أي صوت قبل البدء
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current.currentTime = 0
+      }
       setIsListening(true)
       recognitionRef.current.start()
     }
@@ -106,54 +129,87 @@ export default function VoiceAssistant() {
     }
   }
 
-  const speakResponse = (text: string) => {
-    if ('speechSynthesis' in window) {
-      const synth = window.speechSynthesis
+  const speakResponse = async (text: string) => {
+    try {
+      // أوقف الاستماع أثناء تشغيل الصوت لتجنب التداخل
+      if (recognitionRef.current) {
+        recognitionRef.current.stop()
+      }
       setIsSpeaking(true)
-      const utterance = new SpeechSynthesisUtterance(text)
-      utterance.lang = language === 'ar' ? 'ar-EG' : 'en-US'
-      utterance.rate = 0.9
-      utterance.pitch = 1
-      utterance.volume = 1
 
-      const ensureVoices = () =>
-        new Promise<SpeechSynthesisVoice[]>((resolve) => {
-          const voices = synth.getVoices()
-          if (voices && voices.length) return resolve(voices)
-          const onVoices = () => {
-            synth.removeEventListener('voiceschanged', onVoices)
-            resolve(synth.getVoices())
-          }
-          synth.addEventListener('voiceschanged', onVoices)
-        })
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text,
+          language,
+          // يمكن تخصيص الصوت إن أردت:
+          // voiceName: language === 'ar' ? 'ar-XA-Wavenet-A' : 'en-US-Wavenet-D',
+          speakingRate: 0.95,
+          pitch: 0.0,
+        }),
+      })
 
-      ensureVoices()
-        .then((voices) => {
-          const preferred =
-            voices.find(v => (language === 'ar' ? v.lang?.toLowerCase().startsWith('ar') : v.lang?.toLowerCase().startsWith('en'))) ||
-            voices[0]
-          if (preferred) utterance.voice = preferred
+      if (!res.ok) {
+        const errText = await res.text()
+        console.error('TTS API Error:', errText)
+        setIsSpeaking(false)
+        if (recognitionRef.current) recognitionRef.current.start()
+        return
+      }
 
-          utterance.onend = () => {
-            setIsSpeaking(false)
-          }
+      const data = await res.json()
+      const { audioContent, contentType } = data
+      if (!audioContent) {
+        setIsSpeaking(false)
+        if (recognitionRef.current) recognitionRef.current.start()
+        return
+      }
 
-          synth.cancel()
-          synth.speak(utterance)
-        })
-        .catch(() => {
-          utterance.onend = () => {
-            setIsSpeaking(false)
-          }
-          synth.cancel()
-          synth.speak(utterance)
-        })
+      const audioBytes = atob(audioContent)
+      const len = audioBytes.length
+      const bytes = new Uint8Array(len)
+      for (let i = 0; i < len; i++) bytes[i] = audioBytes.charCodeAt(i)
+
+      const blob = new Blob([bytes], { type: contentType || 'audio/mpeg' })
+      const url = URL.createObjectURL(blob)
+
+      // barge-in: أوقف أي صوت سابق
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current.currentTime = 0
+      }
+      const audio = new Audio(url)
+      audioRef.current = audio
+
+      audio.onended = () => {
+        setIsSpeaking(false)
+        URL.revokeObjectURL(url)
+        // استئناف الاستماع بعد انتهاء الصوت
+        if (recognitionRef.current) recognitionRef.current.start()
+      }
+
+      audio.play().catch(err => {
+        console.error('Audio play error:', err)
+        setIsSpeaking(false)
+        URL.revokeObjectURL(url)
+        if (recognitionRef.current) recognitionRef.current.start()
+      })
+    } catch (e) {
+      console.error('speakResponse error:', e)
+      setIsSpeaking(false)
+      if (recognitionRef.current) recognitionRef.current.start()
     }
   }
 
   const welcomeMessage = () => {
     const welcome = t('voice.welcomeMessage')
     setAiResponse(welcome)
+    // barge-in: أوقف الصوت قبل تشغيل رسالة الترحيب
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current.currentTime = 0
+    }
     speakResponse(welcome)
   }
 
