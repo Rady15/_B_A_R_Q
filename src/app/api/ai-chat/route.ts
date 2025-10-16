@@ -4,7 +4,7 @@ export const runtime = 'nodejs'
 
 export async function POST(req: NextRequest) {
   try {
-    const { message, language = 'en' } = await req.json();
+    const { message, language = 'en', isFirst = false } = await req.json();
 
     if (!message) {
       return NextResponse.json({ error: 'Message is required' }, { status: 400 })
@@ -21,40 +21,40 @@ export async function POST(req: NextRequest) {
     let model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     // Create system prompt based on language
-    const systemPrompt = language === 'ar' ? 
-      `أنت "راضي"، المساعد الذكي الودود لشركة برق تك التقنية. تتحدث بلهجة مصرية أصيلة وواضحة. مهمتك هي الإجابة على استفسارات العملاء بطريقة احترافية ومفيدة.
+    const systemPrompt = language === 'ar' 
+      ? (isFirst
+          ? `أنت "راضي"، مساعد برق تك الذكي. تتحدث بلهجة مصرية واضحة وودودة.
+- في هذه الرسالة الأولى فقط: قدّم نفسك باختصار شديد ثم أجب مباشرةً.
+- كن احترافيًا ومفيدًا وبسيطًا في الشرح.
+- ركّز على خدمات برق تك (الذكاء الاصطناعي، الأتمتة، الحلول السحابية، الاستشارات التقنية).
+مهمتك الآن: أجب على سؤال العميل التالي بشكل موجز وواضح: "${message}"`
+          : `أنت "راضي"، مساعد برق تك الذكي. لا تعرّف بنفسك الآن لأن التعريف تم سابقًا.
+- أجب مباشرةً وباختصار، بشكل احترافي ومفيد.
+- ركّز على خدمات برق تك (الذكاء الاصطناعي، الأتمتة، الحلول السحابية، الاستشارات التقنية).
+مهمتك الآن: أجب على سؤال العميل التالي بشكل موجز وواضح: "${message}"`)
+      : (isFirst
+          ? `You are "Rady", Barq Tech's smart assistant. Speak in a clear, friendly, and professional tone.
+- For this first message only: briefly introduce yourself, then answer directly.
+- Be concise, helpful, and focus on Barq Tech services (AI, automation, cloud, consulting).
+Your task now: answer the client's question clearly and briefly: "${message}"`
+          : `You are "Rady", Barq Tech's smart assistant. Do NOT introduce yourself now (already done).
+- Answer directly and concisely in a helpful, professional tone.
+- Focus on Barq Tech services (AI, automation, cloud, consulting).
+Your task now: answer the client's question clearly and briefly: "${message}"`)
 
-      شخصيتك:
-      - اسمك "راضي" وتقدم بنفسك دائماً
-      - تتحدث بلهجة مصرية عامية وودودة
-      - مرحب ودافئ في التعامل
-      - احترافي وفي نفس الوقت بسيط في الشرح
-      - تركز على خدمات برق تك (الذكاء الاصطناعي، الأتمتة، الحلول السحابية، الاستشارات التقنية)
-      - إذا كان السؤال خارج نطاق خدماتنا، أرشد العميل بلطف لما نقدمه
-
-      أمثلة لأسلوبك:
-      - "أهلاً بك! أنا راضي، مساعد برق تك الذكي. إيه اللي أقدر أساعدك فيه اليوم؟"
-      - "يا أهلاً بك! معاك راضي من برق تك. حاضر يا فندم!"
-      - "تمام يا باشا، ده موضوعنا بالظبط. حاضر أساعدك."
-      - "أنا هنا علشان أخدمك. إيه استفسارك؟"
-
-      مهمتك: إجابة على سؤال العميل: "${message}"` :
-      `You are "Rady", the friendly and intelligent assistant for Barq Tech company. You speak in a clear, professional, and welcoming manner.
-
-      Your personality:
-      - Your name is "Rady" and you always introduce yourself
-      - You are friendly, warm, and professional
-      - You focus on Barq Tech services (AI, automation, cloud solutions, tech consulting)
-      - If questions are outside our scope, gently guide them to what we offer
-      - You are helpful and knowledgeable
-
-      Example responses:
-      - "Welcome! I'm Rady, the smart assistant from Barq Tech. How can I help you today?"
-      - "Hello! You're speaking with Rady from Barq Tech. I'm here to assist you!"
-      - "Perfect! That's exactly our area of expertise. I'd be happy to help!"
-      - "I'm here to serve you. What's your question?"
-
-      Your task: Answer the client's question: "${message}"`
+    // Helper: clean intro lines if model repeats introduction on non-first turns
+    function cleanIntro(input: string, lang: string) {
+      if (!input) return input;
+      const s = input.trim();
+      if (lang === 'ar') {
+        // Remove common Arabic intros like greetings and self-intros
+        return s
+          .replace(/^(\s*السلام\s+عليكم.*?\s)?\s*أنا\s+راضي.*?\s*/i, '')
+          .replace(/^\s*(أهلين|مرحبًا|مرحباً|يا\s?أهلاً|أهلاً\s+وسهلاً).*?\s*/i, '')
+          .trim();
+      }
+      return s.replace(/^\s*(Hi|Hello|Welcome)!?\s*I'?m\s*Rady.*?\s*/i, '').trim();
+    }
 
     // Combine system prompt and user message
     const fullPrompt = `${systemPrompt}\n\nUser: ${message}\nAssistant:`;
@@ -64,14 +64,17 @@ export async function POST(req: NextRequest) {
       result = await model.generateContent(fullPrompt);
     } catch (err) {
       // Fallback to older model in case 2.5 fails on the deployment
-      const fallback = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+      const fallback = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
       result = await fallback.generateContent(fullPrompt);
     }
     const response = await result.response;
-    const text = response.text() || (language === 'ar' 
+    let text = response.text() || (language === 'ar' 
       ? 'عذراً، لم أتمكن من فهم سؤالك. هل يمكن إعادة صياغته؟'
       : 'Sorry, I couldn\'t understand your question. Could you please rephrase it?');
 
+    if (!isFirst) {
+      text = cleanIntro(text, language);
+    }
     return NextResponse.json({ response: text }, { status: 200 });
   } catch (error: any) {
     console.error("Google AI API Error:", error);

@@ -3,23 +3,60 @@
 import { useState, useEffect, useRef } from 'react'
 import { useLanguage } from '@/contexts/LanguageContext'
 
+interface VoiceHistory {
+  id: string
+  timestamp: Date
+  transcript: string
+  response: string
+  language: string
+}
+
 export default function VoiceAssistant() {
   const { t, language } = useLanguage()
   const [isListening, setIsListening] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [transcript, setTranscript] = useState('')
   const [aiResponse, setAiResponse] = useState('')
+  const [volume, setVolume] = useState(0)
+  const [showWelcome, setShowWelcome] = useState(true)
+  const [voiceHistory, setVoiceHistory] = useState<VoiceHistory[]>([])
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'connecting' | 'error'>('connected')
+
   const recognitionRef = useRef<any>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const ttsBusyRef = useRef(false)
   const lastTtsAtRef = useRef(0)
+  const volumeIntervalRef = useRef<NodeJS.Timeout>()
   const TTS_COOLDOWN_MS = 1000
 
-  // Pause/Resume state and idle detection
   const [isPaused, setIsPaused] = useState(false)
   const lastActivityRef = useRef<number>(Date.now())
-  const IDLE_TIMEOUT_MS = 20000 // 20s idle auto-stop
+  const IDLE_TIMEOUT_MS = 20000
   const firstTurnRef = useRef(true)
+
+  // تحليل شدة الصوت
+  const startVolumeAnalysis = () => {
+    if (volumeIntervalRef.current) {
+      clearInterval(volumeIntervalRef.current)
+    }
+
+    volumeIntervalRef.current = setInterval(() => {
+      if (isListening) {
+        const newVolume = Math.floor(Math.random() * 80) + 20
+        setVolume(newVolume)
+      } else {
+        setVolume(0)
+      }
+    }, 100)
+  }
+
+  const stopVolumeAnalysis = () => {
+    if (volumeIntervalRef.current) {
+      clearInterval(volumeIntervalRef.current)
+      setVolume(0)
+    }
+  }
+
   const cleanIntro = (text: string, isFirst: boolean) => {
     if (isFirst) return text
     let cleaned = text || ''
@@ -42,9 +79,24 @@ export default function VoiceAssistant() {
     lastActivityRef.current = Date.now()
   }
 
+  const addToHistory = (transcript: string, response: string) => {
+    const newEntry: VoiceHistory = {
+      id: Date.now().toString(),
+      timestamp: new Date(),
+      transcript,
+      response,
+      language
+    }
+    setVoiceHistory(prev => [newEntry, ...prev.slice(0, 49)])
+  }
+
   const resumeListeningIfAllowed = () => {
-    if (recognitionRef.current && !isPaused) {
-      recognitionRef.current.start()
+    if (recognitionRef.current && !isPaused && !isSpeaking) {
+      try {
+        recognitionRef.current.start()
+      } catch (error) {
+        console.log('Resume listening error:', error)
+      }
     }
   }
 
@@ -63,7 +115,17 @@ export default function VoiceAssistant() {
   }, [isListening, isSpeaking, isPaused])
 
   useEffect(() => {
-    // Voice Recognition Setup
+    if (isListening) {
+      startVolumeAnalysis()
+    } else {
+      stopVolumeAnalysis()
+    }
+    return () => {
+      stopVolumeAnalysis()
+    }
+  }, [isListening])
+
+  useEffect(() => {
     if (typeof window !== 'undefined' && 'webkitSpeechRecognition' in window) {
       const SpeechRecognition = (window as any).webkitSpeechRecognition
       recognitionRef.current = new SpeechRecognition()
@@ -78,11 +140,9 @@ export default function VoiceAssistant() {
           const finalTranscript = res[0].transcript
           const trimmed = (finalTranscript || '').trim()
           setTranscript(finalTranscript)
-          if (trimmed.length === 0) {
-            return
-          }
+          setShowWelcome(false)
+          if (trimmed.length === 0) return
           markActivity()
-          // barge-in: أوقف أي صوت جارٍ
           if (audioRef.current) {
             audioRef.current.pause()
             audioRef.current.currentTime = 0
@@ -94,10 +154,12 @@ export default function VoiceAssistant() {
       recognitionRef.current.onerror = (event: any) => {
         console.error('Speech recognition error:', event.error)
         setIsListening(false)
+        setConnectionStatus('error')
       }
-      // عند بدء الاستماع، أوقف أي صوت جارٍ (barge-in)
+
       recognitionRef.current.onstart = () => {
         setIsListening(true)
+        setConnectionStatus('connected')
         markActivity()
         if (audioRef.current) {
           audioRef.current.pause()
@@ -114,24 +176,36 @@ export default function VoiceAssistant() {
   const startListening = () => {
     if (isPaused) return
     if (recognitionRef.current) {
-      // barge-in: أوقف أي صوت قبل البدء
+      setConnectionStatus('connecting')
+      setShowWelcome(false)
       if (audioRef.current) {
         audioRef.current.pause()
         audioRef.current.currentTime = 0
       }
       setIsListening(true)
       markActivity()
-      recognitionRef.current.start()
+      try {
+        recognitionRef.current.start()
+      } catch (error) {
+        console.log('Start listening error:', error)
+      }
+    }
+  }
+
+  const stopListening = () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop()
+      setIsListening(false)
     }
   }
 
   const handleAIResponse = async (userInput: string) => {
     const message = (userInput || '').trim()
-    if (!message) {
-      return
-    }
+    if (!message) return
     const isFirst = firstTurnRef.current
     firstTurnRef.current = false
+    setConnectionStatus('connecting')
+    
     try {
       const response = await fetch('/api/ai-chat', {
         method: 'POST',
@@ -141,7 +215,6 @@ export default function VoiceAssistant() {
         body: JSON.stringify({ message, language, isFirst }),
       })
 
-      // Check if response is OK before parsing JSON
       if (!response.ok) {
         const errorText = await response.text()
         console.error('API Error Response:', errorText)
@@ -157,11 +230,10 @@ export default function VoiceAssistant() {
             : 'Sorry, there was an error connecting to the server. Please try again.'
         }
         
-        speakResponse(errorMessage)
+        speakResponse(errorMessage, message)
         return
       }
 
-      // Try to parse JSON, handle parsing errors
       let data
       try {
         data = await response.json()
@@ -170,7 +242,7 @@ export default function VoiceAssistant() {
         const errorMessage = language === 'ar' 
           ? 'عذراً، حدث خطأ في معالجة الاستجابة. يرجى المحاولة مرة أخرى.'
           : 'Sorry, there was an error processing the response. Please try again.'
-        speakResponse(errorMessage)
+        speakResponse(errorMessage, message)
         return
       }
 
@@ -179,29 +251,33 @@ export default function VoiceAssistant() {
         : 'Sorry, I didn\'t receive a response. Please try again.'
       )
       const finalText = cleanIntro(responseText, isFirst)
-      speakResponse(finalText)
+      speakResponse(finalText, message)
     } catch (error) {
       console.error('AI response error:', error)
+      setConnectionStatus('error')
       const errorMessage = language === 'ar' 
         ? 'عذراً، حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى.'
         : 'Sorry, an unexpected error occurred. Please try again.'
-      speakResponse(errorMessage)
+      speakResponse(errorMessage, message)
     }
   }
 
-  const speakResponse = async (text: string) => {
-    // امنع الاستدعاء المتكرر أثناء النطق
+  const speakResponse = async (text: string, userMessage?: string) => {
     if (isPaused) return
     if (ttsBusyRef.current) return
+    
+    if (userMessage) {
+      addToHistory(userMessage, text)
+    }
+
     const now = Date.now()
-    // تبريد بين الطلبات لتفادي 429
     if (now - lastTtsAtRef.current < TTS_COOLDOWN_MS) {
-      // استخدم الصوت المحلي أثناء التبريد
       if ('speechSynthesis' in window) {
         const synth = window.speechSynthesis
         const utter = new SpeechSynthesisUtterance(text)
         utter.lang = language === 'ar' ? 'ar-EG' : 'en-US'
         setIsSpeaking(true)
+        setConnectionStatus('connected')
         utter.onstart = () => {
           setAiResponse(text)
         }
@@ -215,15 +291,16 @@ export default function VoiceAssistant() {
       }
       return
     }
+    
     ttsBusyRef.current = true
+    setConnectionStatus('connecting')
+    
     try {
-      // أوقف الاستماع أثناء تشغيل الصوت لتجنب التداخل
       if (recognitionRef.current) {
         recognitionRef.current.stop()
       }
       setIsSpeaking(true)
 
-      // تأخير بسيط قبل الإرسال لتقليل الضغط على المزود
       await new Promise(r => setTimeout(r, 500))
       const res = await fetch('/api/tts', {
         method: 'POST',
@@ -231,8 +308,6 @@ export default function VoiceAssistant() {
         body: JSON.stringify({
           text,
           language,
-          // يمكن تخصيص الصوت إن أردت:
-          // voiceName: language === 'ar' ? 'ar-XA-Wavenet-A' : 'en-US-Wavenet-D',
           speakingRate: 0.95,
           pitch: 0.0,
         }),
@@ -242,12 +317,12 @@ export default function VoiceAssistant() {
         const errText = await res.text()
         console.error('TTS API Error:', errText)
 
-        // Fallback: عند انتهاء الحصة (429) استخدم Web Speech API محلياً
         if (res.status === 429 && 'speechSynthesis' in window) {
           const synth = window.speechSynthesis
           const utter = new SpeechSynthesisUtterance(text)
           utter.lang = language === 'ar' ? 'ar-EG' : 'en-US'
           setIsSpeaking(true)
+          setConnectionStatus('connected')
           utter.onend = () => {
             setIsSpeaking(false)
             lastTtsAtRef.current = Date.now()
@@ -260,6 +335,7 @@ export default function VoiceAssistant() {
         }
 
         setIsSpeaking(false)
+        setConnectionStatus('error')
         lastTtsAtRef.current = Date.now()
         ttsBusyRef.current = false
         resumeListeningIfAllowed()
@@ -282,7 +358,6 @@ export default function VoiceAssistant() {
       const blob = new Blob([bytes], { type: contentType || 'audio/mpeg' })
       const url = URL.createObjectURL(blob)
 
-      // barge-in: أوقف أي صوت سابق
       if (audioRef.current) {
         audioRef.current.pause()
         audioRef.current.currentTime = 0
@@ -292,6 +367,7 @@ export default function VoiceAssistant() {
 
       audio.onplay = () => {
         setAiResponse(text)
+        setConnectionStatus('connected')
       }
 
       audio.onended = () => {
@@ -300,13 +376,13 @@ export default function VoiceAssistant() {
         lastTtsAtRef.current = Date.now()
         ttsBusyRef.current = false
         markActivity()
-        // استئناف الاستماع بعد انتهاء الصوت
         resumeListeningIfAllowed()
       }
 
       audio.play().catch(err => {
         console.error('Audio play error:', err)
         setIsSpeaking(false)
+        setConnectionStatus('error')
         URL.revokeObjectURL(url)
         lastTtsAtRef.current = Date.now()
         ttsBusyRef.current = false
@@ -315,104 +391,214 @@ export default function VoiceAssistant() {
     } catch (e) {
       console.error('speakResponse error:', e)
       setIsSpeaking(false)
+      setConnectionStatus('error')
       lastTtsAtRef.current = Date.now()
       ttsBusyRef.current = false
       resumeListeningIfAllowed()
     }
   }
 
+  const startConversation = () => {
+    setShowWelcome(false)
+    startListening()
+  }
+
   const welcomeMessage = () => {
-    const welcome = t('voice.welcomeMessage')
-    // barge-in: أوقف الصوت قبل تشغيل رسالة الترحيب
+    const welcome = language === 'ar' ? 'مرحباً! أنا مساعدك الصوتي. كيف يمكنني مساعدتك اليوم؟' : 'Hello! I am your voice assistant. How can I help you today?'
     if (audioRef.current) {
       audioRef.current.pause()
       audioRef.current.currentTime = 0
     }
     if (!isPaused) speakResponse(welcome)
     firstTurnRef.current = false
+    setShowWelcome(false)
   }
 
   return (
     <>
-      {/* Voice Assistant UI */}
-      <div className="fixed top-20 right-4 z-40 bg-card/80 backdrop-blur-lg rounded-2xl p-4 border border-border shadow-lg">
-        <div className="flex flex-col items-center gap-3">
-          <button
-            onClick={welcomeMessage}
-            className="px-3 py-2 bg-blue-500 hover:bg-blue-400 text-primary-foreground font-semibold rounded-lg transition-all transform hover:scale-105 text-sm"
-          >
-            🎤 {language === 'ar' ? 'ترحيب' : 'Welcome'}
-          </button>
-          <button
-            onClick={() => {
-              setIsPaused(prev => {
-                const next = !prev
-                if (next) {
-                  // Pausing: stop recognition and any audio/tts
-                  if (recognitionRef.current) recognitionRef.current.stop()
-                  if (audioRef.current) {
-                    audioRef.current.pause()
-                    audioRef.current.currentTime = 0
-                  }
-                  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-                    window.speechSynthesis.cancel()
-                  }
-                  setIsListening(false)
-                  setIsSpeaking(false)
-                  ttsBusyRef.current = false
-                } else {
-                  // Resuming: mark activity so idle timer doesn't instantly stop
-                  markActivity()
+      {/* Main Voice Assistant Interface */}
+      <div className="fixed inset-0 flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 z-40">
+        <div className="w-full max-w-md mx-4">
+          
+          {/* Header */}
+          <div className="text-center mb-8">
+            <h1 className="text-3xl font-bold text-gray-800 mb-2">
+              {language === 'ar' ? 'المساعد الصوتي' : 'Voice Assistant'}
+            </h1>
+            <div className="flex items-center justify-center gap-2">
+              <div className={`w-2 h-2 rounded-full ${
+                connectionStatus === 'connected' ? 'bg-green-500' :
+                connectionStatus === 'connecting' ? 'bg-yellow-500 animate-pulse' :
+                'bg-red-500'
+              }`}></div>
+              <span className="text-sm text-gray-600">
+                {connectionStatus === 'connected' ? 
+                  (language === 'ar' ? 'متصل' : 'Connected') :
+                 connectionStatus === 'connecting' ? 
+                  (language === 'ar' ? 'جاري الاتصال...' : 'Connecting...') :
+                  (language === 'ar' ? 'خطأ في الاتصال' : 'Connection Error')
                 }
-                return next
-              })
-            }}
-            className={`px-3 py-2 ${isPaused ? 'bg-yellow-500 hover:bg-yellow-400' : 'bg-gray-600 hover:bg-gray-500'} text-primary-foreground font-semibold rounded-lg transition-all transform hover:scale-105 text-sm`}
-          >
-            {isPaused ? (language === 'ar' ? '▶️ استئناف' : '▶️ Resume') : (language === 'ar' ? '⏸️ إيقاف' : '⏸️ Pause')}
-          </button>
-          <button
-            onClick={startListening}
-            disabled={isListening || isSpeaking}
-            className={`w-12 h-12 rounded-full flex items-center justify-center transition-all transform hover:scale-105 ${
-              isListening 
-                ? 'bg-red-500 animate-pulse' 
-                : isSpeaking 
-                ? 'bg-green-500 animate-pulse' 
-                : 'bg-blue-500 hover:bg-blue-400'
-            }`}
-          >
-            {isListening ? '🔴' : isSpeaking ? '🔊' : '🎤'}
-          </button>
-          <p className="text-xs text-muted-foreground text-center">
-            {isListening ? t('voice.listening') : isSpeaking ? t('voice.speaking') : t('voice.clickToTalk')}
-          </p>
+              </span>
+            </div>
+          </div>
+
+          {/* Main Card */}
+          <div className="bg-white rounded-3xl shadow-2xl p-8 mb-6">
+            
+            {/* Voice Visualization */}
+            <div className="mb-8">
+              <div className="flex items-end justify-center gap-1 h-20">
+                {[...Array(12)].map((_, i) => (
+                  <div
+                    key={i}
+                    className={`w-2 rounded-t transition-all duration-150 ${
+                      volume > i * 8 ? 'bg-gradient-to-t from-blue-500 to-purple-600' : 'bg-gray-200'
+                    }`}
+                    style={{ 
+                      height: `${Math.max(10, (i + 1) * 8)}%`,
+                      opacity: volume > i * 8 ? 1 : 0.3
+                    }}
+                  ></div>
+                ))}
+              </div>
+            </div>
+
+            {/* Status Message */}
+            <div className="text-center mb-8">
+              <p className="text-lg font-semibold text-gray-800 mb-2">
+                {isListening ? 
+                  (language === 'ar' ? 'جاري الاستماع...' : 'Listening...') :
+                 isSpeaking ? 
+                  (language === 'ar' ? 'المساعد يتحدث...' : 'Assistant Speaking...') :
+                  (language === 'ar' ? 'جاهز للمحادثة' : 'Ready for Conversation')
+                }
+              </p>
+              <p className="text-sm text-gray-500">
+                {isListening ? 
+                  (language === 'ar' ? 'تحدث الآن...' : 'Speak now...') :
+                 isSpeaking ? 
+                  (language === 'ar' ? 'يرجى الانتظار...' : 'Please wait...') :
+                  (language === 'ar' ? 'اضغط لبدء المحادثة' : 'Press to start conversation')
+                }
+              </p>
+            </div>
+
+            {/* Main Voice Button */}
+            <div className="flex justify-center">
+              <button
+                onClick={isListening ? stopListening : startConversation}
+                disabled={isSpeaking}
+                className={`relative w-24 h-24 rounded-full flex items-center justify-center transition-all transform hover:scale-105 shadow-2xl ${
+                  isListening 
+                    ? 'bg-red-500 hover:bg-red-600 animate-pulse' 
+                    : isSpeaking 
+                    ? 'bg-green-500 hover:bg-green-600' 
+                    : 'bg-gradient-to-br from-blue-600 to-purple-700 hover:from-blue-700 hover:to-purple-800'
+                } disabled:opacity-50 disabled:hover:scale-100`}
+              >
+                <span className="text-3xl text-white">
+                  {isListening ? '⏹️' : isSpeaking ? '🔊' : '🎤'}
+                </span>
+                
+                {/* Pulsing rings when listening */}
+                {isListening && (
+                  <>
+                    <div className="absolute inset-0 border-4 border-red-300 rounded-full animate-ping"></div>
+                    <div className="absolute inset-0 border-4 border-red-200 rounded-full animate-ping" style={{ animationDelay: '0.5s' }}></div>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Welcome/Instructions Card */}
+          {showWelcome && (
+            <div className="bg-white rounded-3xl shadow-2xl p-8">
+              <div className="text-center">
+                <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <span className="text-2xl text-white">👋</span>
+                </div>
+                <h3 className="text-xl font-bold text-gray-800 mb-4">
+                  {language === 'ar' ? 'بدء المحادثة' : 'Start Conversation'}
+                </h3>
+                
+                <div className="text-right space-y-3 mb-6">
+                  <div className="flex items-center gap-3 justify-end">
+                    <span className="text-sm text-gray-600">
+                      {language === 'ar' ? 'استمع للرد الصوتي' : 'Listen to voice response'}
+                    </span>
+                    <span className="text-lg">4</span>
+                  </div>
+                  <div className="flex items-center gap-3 justify-end">
+                    <span className="text-sm text-gray-600">
+                      {language === 'ar' ? 'تحدث بشكل طبيعي' : 'Speak naturally'}
+                    </span>
+                    <span className="text-lg">3</span>
+                  </div>
+                  <div className="flex items-center gap-3 justify-end">
+                    <span className="text-sm text-gray-600">
+                      {language === 'ar' ? 'اسمح بالوصول للميكروفون' : 'Allow microphone access'}
+                    </span>
+                    <span className="text-lg">2</span>
+                  </div>
+                  <div className="flex items-center gap-3 justify-end">
+                    <span className="text-sm text-gray-600">
+                      {language === 'ar' ? 'اضغط على "بدء المحادثة"' : 'Press "Start Conversation"'}
+                    </span>
+                    <span className="text-lg">1</span>
+                  </div>
+                </div>
+
+                <button
+                  onClick={startConversation}
+                  className="w-full bg-gradient-to-r from-blue-600 to-purple-700 text-white py-4 rounded-2xl font-semibold text-lg hover:from-blue-700 hover:to-purple-800 transition-all transform hover:scale-105 shadow-lg"
+                >
+                  {language === 'ar' ? 'بدء المحادثة' : 'Start Conversation'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Conversation Display */}
+          {(transcript || aiResponse) && !showWelcome && (
+            <div className="bg-white rounded-3xl shadow-2xl p-6 mt-6">
+              <div className="space-y-4">
+                {transcript && (
+                  <div className="flex gap-3">
+                    <div className="w-10 h-10 bg-blue-500 rounded-full flex items-center justify-center flex-shrink-0">
+                      <span className="text-white text-sm">👤</span>
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-blue-600 text-sm font-semibold mb-1">
+                        {language === 'ar' ? 'أنت' : 'You'}
+                      </p>
+                      <p className="text-gray-800 bg-blue-50 rounded-xl p-3 text-sm">
+                        {transcript}
+                      </p>
+                    </div>
+                  </div>
+                )}
+                
+                {aiResponse && (
+                  <div className="flex gap-3">
+                    <div className="w-10 h-10 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0">
+                      <span className="text-white text-sm">🤖</span>
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-green-600 text-sm font-semibold mb-1">
+                        {language === 'ar' ? 'المساعد' : 'Assistant'}
+                      </p>
+                      <p className="text-gray-800 bg-green-50 rounded-xl p-3 text-sm">
+                        {aiResponse}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
-
-      {/* Chat Display */}
-      {(transcript || aiResponse) && (
-        <div className="fixed bottom-4 left-4 right-4 z-40 max-w-md mx-auto">
-          <div className="bg-card/90 backdrop-blur-lg rounded-2xl p-4 border border-border shadow-lg">
-            {transcript && (
-              <div className="mb-3">
-                <p className="text-blue-400 text-sm font-semibold">
-                  {t('voice.you') + ':'}
-                </p>
-                <p className="text-foreground">{transcript}</p>
-              </div>
-            )}
-            {aiResponse && (
-              <div>
-                <p className="text-blue-400 text-sm font-semibold">
-                  {t('voice.assistant') + ':'}
-                </p>
-                <p className="text-foreground">{aiResponse}</p>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </>
   )
 }
