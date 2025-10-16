@@ -20,6 +20,23 @@ export default function VoiceAssistant() {
   const lastActivityRef = useRef<number>(Date.now())
   const IDLE_TIMEOUT_MS = 20000 // 20s idle auto-stop
   const firstTurnRef = useRef(true)
+  const cleanIntro = (text: string, isFirst: boolean) => {
+    if (isFirst) return text
+    let cleaned = text || ''
+    const patterns = [
+      /^\s*(مرحب|أهلًا|اهلاً|السلام\s+عليكم|أنا|اسمي|مساعد)/i,
+      /^\s*(hello|hi|hey|greetings|i am|i'm|my name|assistant)/i
+    ]
+    for (const p of patterns) {
+      if (p.test(cleaned)) {
+        const cuts = [cleaned.indexOf('\n'), cleaned.indexOf('.'), cleaned.indexOf('!'), cleaned.indexOf('?'), cleaned.indexOf('؟')]
+        const idx = cuts.filter(i => i >= 0).sort((a,b)=>a-b)[0]
+        cleaned = idx !== undefined ? cleaned.slice(idx + 1).trim() : cleaned
+        break
+      }
+    }
+    return cleaned
+  }
 
   const markActivity = () => {
     lastActivityRef.current = Date.now()
@@ -140,7 +157,6 @@ export default function VoiceAssistant() {
             : 'Sorry, there was an error connecting to the server. Please try again.'
         }
         
-        setAiResponse(errorMessage)
         speakResponse(errorMessage)
         return
       }
@@ -154,7 +170,6 @@ export default function VoiceAssistant() {
         const errorMessage = language === 'ar' 
           ? 'عذراً، حدث خطأ في معالجة الاستجابة. يرجى المحاولة مرة أخرى.'
           : 'Sorry, there was an error processing the response. Please try again.'
-        setAiResponse(errorMessage)
         speakResponse(errorMessage)
         return
       }
@@ -163,15 +178,13 @@ export default function VoiceAssistant() {
         ? 'عذراً، لم أتلقَ استجابة. يرجى المحاولة مرة أخرى.'
         : 'Sorry, I didn\'t receive a response. Please try again.'
       )
-      
-      setAiResponse(responseText)
-      speakResponse(responseText)
+      const finalText = cleanIntro(responseText, isFirst)
+      speakResponse(finalText)
     } catch (error) {
       console.error('AI response error:', error)
       const errorMessage = language === 'ar' 
         ? 'عذراً، حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى.'
         : 'Sorry, an unexpected error occurred. Please try again.'
-      setAiResponse(errorMessage)
       speakResponse(errorMessage)
     }
   }
@@ -189,6 +202,9 @@ export default function VoiceAssistant() {
         const utter = new SpeechSynthesisUtterance(text)
         utter.lang = language === 'ar' ? 'ar-EG' : 'en-US'
         setIsSpeaking(true)
+        utter.onstart = () => {
+          setAiResponse(text)
+        }
         utter.onend = () => {
           setIsSpeaking(false)
           lastTtsAtRef.current = Date.now()
@@ -274,6 +290,10 @@ export default function VoiceAssistant() {
       const audio = new Audio(url)
       audioRef.current = audio
 
+      audio.onplay = () => {
+        setAiResponse(text)
+      }
+
       audio.onended = () => {
         setIsSpeaking(false)
         URL.revokeObjectURL(url)
@@ -303,7 +323,6 @@ export default function VoiceAssistant() {
 
   const welcomeMessage = () => {
     const welcome = t('voice.welcomeMessage')
-    setAiResponse(welcome)
     // barge-in: أوقف الصوت قبل تشغيل رسالة الترحيب
     if (audioRef.current) {
       audioRef.current.pause()
