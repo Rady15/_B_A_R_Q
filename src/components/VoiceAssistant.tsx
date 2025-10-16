@@ -151,10 +151,7 @@ export default function VoiceAssistant() {
       })
 
       if (!res.ok) {
-        const errText = await res.text()
-        console.error('TTS API Error:', errText)
-
-        // Fallback: عند انتهاء الحصة (429) استخدم Web Speech API محلياً
+        // Fallback: عند انتهاء الحصة (429) استخدم Web Speech API محلياً بدون طباعة خطأ
         if (res.status === 429 && 'speechSynthesis' in window) {
           const synth = window.speechSynthesis
           const utter = new SpeechSynthesisUtterance(text)
@@ -169,6 +166,9 @@ export default function VoiceAssistant() {
           return
         }
 
+        // حالات أخرى: اطبع الخطأ ثم ارجع للاستماع
+        const errText = await res.text()
+        console.error('TTS API Error:', errText)
         setIsSpeaking(false)
         if (recognitionRef.current) recognitionRef.current.start()
         return
