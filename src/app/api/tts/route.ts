@@ -7,7 +7,7 @@ export const dynamic = 'force-dynamic';
 const lastHitPerIp = new Map<string, number>();
 const RATE_LIMIT_MS = 1000;
 
-const DEFAULT_ELEVEN_VOICE = 'nPczCjzI2devNBz1zQrb'; // "Rachel" default voiceId
+const DEFAULT_ELEVEN_VOICE = 'Ojb0nFbyzZn95u0i5a5p'; // "Rachel" default voiceId
 
 export async function POST(req: NextRequest) {
   try {
@@ -81,19 +81,33 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // تحقق من نوع المحتوى قبل إعادة الصوت
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.startsWith('audio/')) {
+      let details = '';
+      try {
+        const j = await res.json();
+        details = JSON.stringify(j);
+      } catch {
+        details = await res.text();
+      }
+      return NextResponse.json(
+        { error: 'TTS Error', details: details || `Unexpected content type: ${ct}` },
+        { status: 502 }
+      );
+    }
+
     // ElevenLabs يعيد Blob/stream صوتي (audio/mpeg)
     const arrayBuffer = await res.arrayBuffer();
-    const base64Audio = Buffer.from(arrayBuffer).toString('base64');
 
-    return NextResponse.json(
-      {
-        audioContent: base64Audio,
-        contentType: 'audio/mpeg',
-        provider: 'elevenlabs',
-        voiceId: vId
-      },
-      { status: 200 }
-    );
+    // أعد الصوت كثنائي مباشرةً
+    return new Response(arrayBuffer, {
+      status: 200,
+      headers: {
+        'Content-Type': ct || 'audio/mpeg',
+        'Cache-Control': 'no-store'
+      }
+    });
   } catch (error: any) {
     const errMsg = (error && (error.message || error.toString())) || 'Unknown error';
     const statusFromResp = (error?.response && (error.response.status || error.response.statusCode)) || undefined;
